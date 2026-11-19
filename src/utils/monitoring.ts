@@ -1,58 +1,91 @@
 export type TelemetryCategory =
+  | 'page_view'
   | 'ai_inference'
-  | 'runtime_error'
-  | 'ledger_crud';
+  | 'ledger_crud'
+  | 'database'
+  | 'runtime_error';
 
 export interface TelemetryEvent {
-  id: number;
-  name: string;
+  id: string;
+  event: string;
   category: TelemetryCategory;
-  /** Arbitrary event attributes, e.g. { category, durationMs } */
-  props?: Record<string, unknown>;
-  timestamp: number;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+  timestamp: string;
 }
 
-type Listener = (events: TelemetryEvent[]) => void;
+const MAX_BUFFER_SIZE = 100;
+const telemetryBuffer: TelemetryEvent[] = [];
+const listeners: Set<(events: TelemetryEvent[]) => void> = new Set();
 
-let nextId = 1;
-const MAX_EVENTS = 100;
-let log: TelemetryEvent[] = [];
-const listeners = new Set<Listener>();
+function notifyListeners(): void {
+  const snapshot = [...telemetryBuffer];
+  listeners.forEach((listener) => listener(snapshot));
+}
 
-/**
- * Records a telemetry event and notifies subscribers.
- * Never throws — telemetry must not break app flows.
- */
 export function trackEvent(
-  name: string,
+  event: string,
   category: TelemetryCategory,
-  props?: Record<string, unknown>,
-  durationMs?: number,
-): void {
-  try {
-    const event: TelemetryEvent = {
-      id: nextId++,
-      name,
-      category,
-      props: durationMs !== undefined ? { ...props, durationMs } : props,
-      timestamp: Date.now(),
-    };
-    log = [event, ...log].slice(0, MAX_EVENTS);
-    listeners.forEach((l) => l(log));
-  } catch {
-    // Telemetry must never break app flows.
-  }
-}
-
-/** Subscribes to the telemetry log; returns an unsubscribe function. */
-export function subscribeTelemetry(listener: Listener): () => void {
-  listeners.add(listener);
-  listener(log);
-  return () => {
-    listeners.delete(listener);
+  metadata?: Record<string, unknown>,
+  durationMs?: number
+): TelemetryEvent {
+  const entry: TelemetryEvent = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    event,
+    category,
+    durationMs,
+    metadata,
+    timestamp: new Date().toISOString(),
   };
+
+  telemetryBuffer.unshift(entry);
+  if (telemetryBuffer.length > MAX_BUFFER_SIZE) {
+    telemetryBuffer.pop();
+  }
+
+  const label = `[KaFarmers Monitor] [${category.toUpperCase()}] ${event}`;
+  if (category === 'runtime_error') {
+    console.error(label, { durationMs, ...metadata });
+  } else {
+    console.info(label, { durationMs, ...metadata });
+  }
+
+  notifyListeners();
+  return entry;
 }
 
-export function getTelemetryLog(): TelemetryEvent[] {
-  return log;
+export function initGlobalErrorMonitoring(): void {
+  if (typeof window === 'undefined') return;
+
+  window.addEventListener('error', (event) => {
+    trackEvent('uncaught_runtime_error', 'runtime_error', {
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno,
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    trackEvent('unhandled_promise_rejection', 'runtime_error', {
+      reason:
+        event.reason instanceof Error
+          ? event.reason.message
+          : String(event.reason),
+    });
+  });
+}
+
+export function getTelemetryEvents(): TelemetryEvent[] {
+  return [...telemetryBuffer];
+}
+
+export function subscribeTelemetry(
+  callback: (events: TelemetryEvent[]) => void
+): () => void {
+  listeners.add(callback);
+  callback([...telemetryBuffer]);
+  return () => {
+    listeners.delete(callback);
+  };
 }
