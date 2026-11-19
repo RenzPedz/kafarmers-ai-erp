@@ -1,6 +1,6 @@
 # KaFarmers AI — Input Cost & Margin Mini-ERP
 
-**Live App URL:** (https://kafarmers-ai-erp.vercel.app/)
+**Live App URL:** https://kafarmers-ai-mini-er-umy8.bolt.host
 
 ## Overview
 KaFarmers AI is a browser-native Mini-ERP built for smallholder rice and corn farmers to prevent "input cost bleed." It tracks per-hectare expenses, calculates real-time break-even farmgate prices (PHP/kg), and uses client-side AI (`@huggingface/transformers`) to auto-categorize raw expense notes and audit farm margins—with zero external API keys required.
