@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Sprout, Wallet, Gauge, Scale, PiggyBank, Sparkles, Loader2, Trash2, Plus,
-  Wand2, AlertTriangle, ShieldCheck, Save, CheckCircle2, X, WifiOff, Leaf,
+  Wand2, AlertTriangle, ShieldCheck, Save, CheckCircle2, X, WifiOff, Leaf, Activity, ChevronDown,
 } from 'lucide-react';
 import { supabase } from './lib/supabaseClient';
 import {
@@ -12,6 +12,7 @@ import {
 import {
   classifyExpense, getModelStatus, onModelStatus, preloadModel, type ModelStatus,
 } from './lib/aiCategorize';
+import { subscribeTelemetry, trackEvent, type TelemetryEvent } from './utils/monitoring';
 
 interface FarmSettingsRow {
   farm_name: string;
@@ -67,8 +68,14 @@ export default function App() {
   // Audit
   const [audit, setAudit] = useState<MarginAudit | null>(null);
   const [auditRunning, setAuditRunning] = useState(false);
+  const [telemetryOpen, setTelemetryOpen] = useState(false);
+  const [telemetryLog, setTelemetryLog] = useState<TelemetryEvent[]>([]);
 
   useEffect(() => onModelStatus(setModelStatus), []);
+  useEffect(
+    () => subscribeTelemetry(setTelemetryLog),
+    [],
+  );
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -157,10 +164,12 @@ export default function App() {
       .single();
     if (!error && data) {
       setExpenses((prev) => [data as Expense, ...prev]);
+      trackEvent('expense_added', 'ledger_crud', { category: form.category, amount: Number(form.amount) });
       setForm({ description: '', amount: '', plot_name: form.plot_name, expense_date: todayISO(), category: '' });
       setFormIssues([]);
       setAiNote(null);
     } else {
+      if (error) trackEvent('supabase_write_error', 'runtime_error', { message: error.message });
       setDbError('Could not add expense. ' + (error?.message ?? ''));
     }
   };
@@ -177,14 +186,29 @@ export default function App() {
     }
     setAiBusy(true);
     setAiNote(null);
+    const startedAt = performance.now();
     try {
       const result = await classifyExpense(form.description.trim());
       setForm((f) => ({ ...f, category: result.category }));
+      trackEvent(
+        'ai_expense_classified',
+        'ai_inference',
+        { category: result.category },
+        Math.round(performance.now() - startedAt),
+      );
       setAiNote(
         result.method === 'model'
           ? `AI matched this to ${result.category} (${Math.round(result.confidence * 100)}% confidence).`
           : `Classified as ${result.category} using keyword matching while the AI model loads.`,
       );
+    } catch (err) {
+      trackEvent(
+        'ai_classification_failed',
+        'runtime_error',
+        { error: String(err) },
+        Math.round(performance.now() - startedAt),
+      );
+      setAiNote('AI classification failed. Please pick a category manually.');
     } finally {
       setAiBusy(false);
     }
@@ -193,8 +217,16 @@ export default function App() {
   const runAudit = async () => {
     setAuditRunning(true);
     preloadModel(); // warm the model in the background for future categorization
+    const startedAt = performance.now();
     await new Promise((r) => setTimeout(r, 700)); // let the panel animate in
-    setAudit(runMarginAudit(expenses, setup));
+    const result = runMarginAudit(expenses, setup);
+    trackEvent(
+      'ai_margin_audit_completed',
+      'ai_inference',
+      { healthScore: result.score },
+      Math.round(performance.now() - startedAt),
+    );
+    setAudit(result);
     setAuditRunning(false);
   };
 
@@ -240,8 +272,40 @@ export default function App() {
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${badge.cls}`}>
               {badge.icon} {badge.text}
             </span>
+            <button
+              onClick={() => setTelemetryOpen((o) => !o)}
+              aria-expanded={telemetryOpen}
+              className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-800/40 px-3 py-1 text-xs font-medium text-emerald-100 transition hover:bg-emerald-700/50"
+            >
+              <Activity className="h-3.5 w-3.5" /> Telemetry
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${telemetryOpen ? 'rotate-180' : ''}`} />
+            </button>
           </div>
         </div>
+        {telemetryOpen && (
+          <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-950/50 p-4">
+            {telemetryLog.length === 0 ? (
+              <p className="text-xs text-emerald-200/70">No telemetry events recorded yet. Actions you take will appear here.</p>
+            ) : (
+              <ul className="max-h-64 space-y-1 overflow-y-auto text-xs">
+                {telemetryLog.map((ev) => (
+                  <li key={ev.id} className="flex flex-wrap items-baseline gap-2 text-emerald-100/90">
+                    <span className="text-emerald-300/70 tabular-nums">
+                      {new Date(ev.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span className="font-semibold">{ev.name}</span>
+                    <span className="rounded-full bg-emerald-900/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">{ev.category}</span>
+                    {ev.props && (
+                      <span className="text-emerald-200/70">
+                        {Object.entries(ev.props).map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
